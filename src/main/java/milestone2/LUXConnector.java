@@ -1,0 +1,152 @@
+package milestone2;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.log4j.Logger;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import milestone4.SPARQLInterface;
+
+/**
+ * This is the Connector for the SPARQL Endpoint which will receive the values of 
+ * all the LDR's of all the other Groups.
+ * @author Sven Andresen
+ *
+ */
+public class LUXConnector extends Thread implements SPARQLInterface {
+	private static Logger LOG = Logger.getLogger(LUXConnector.class.getName());
+	
+	private String sparql = "PREFIX pit: <https://pit.itm.uni-luebeck.de/>\n"+
+							"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n"+
+							"PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n"+
+							"\n"+
+							"SELECT (AVG(xsd:float(?x)) AS ?lux) WHERE {\n"+
+							"?comp pit:isType \"LDR\"^^xsd:string.\n"+
+							"?comp pit:hasStatus ?status.\n"+
+							"?status pit:hasScaleUnit \"Lux\"^^xsd:string.\n"+
+							"?status pit:hasValue ?x\n"+
+							"}\n";
+	private String ip = "141.83.151.196";
+	private String port = "8080";
+	private String accept = "text/csv";
+	
+	private final String regex = "\\d+[.\\d+]*";
+	private final Pattern pattern = Pattern.compile(regex);
+	
+	private List<SparqlListener> listeners = new ArrayList<SparqlListener>();
+		
+	/**
+	 * Gets the result of the Sparql Query form the endpoint.
+	 * @return Linked list of the strings as results.
+	 * @throws Exception
+	 */
+	public LinkedList<String> getResult() throws Exception {
+		
+		HttpClient client = HttpClientBuilder.create().build();
+		HttpPost post = new HttpPost("http://" + this.ip + ":" + this.port + "/services/sparql-endpoint");
+		
+		post.addHeader("Accept", this.accept);
+		post.addHeader("Content-Type", "multipart/form-data; boundary=DATA");
+
+		String data = "--DATA\n" +
+				"Content-Disposition: form-data; name=\"query\"\n\n" +
+				this.sparql + "\n" +
+				"--DATA--";
+		post.setEntity(new StringEntity(data));
+		
+		HttpResponse response = client.execute(post);
+		BufferedReader rd = new BufferedReader(new InputStreamReader(response.getEntity().getContent()));
+		LinkedList<String> lines = new LinkedList<String>();
+		String line = "";
+		while ((line = rd.readLine()) != null) {
+			lines.add(line.trim());
+		}
+		return lines;
+	}	
+	
+	/* (non-Javadoc)
+	 * @see java.lang.Thread#run()
+	 */
+	public void run() {
+		LOG.info("Starting connection to SPARQL Endpoint: " + ip);
+		while(true) {
+			LinkedList<String> ll;
+			try {
+				ll = getResult();
+				if(ll.isEmpty())
+					LOG.error("Nothing returned from SPARQL");
+				else if(ll.size() == 1) {
+					HashMap<String,Object> result =
+					        new ObjectMapper().readValue(ll.removeFirst(), HashMap.class);
+					String results = (String) result.get("results");
+					Matcher matcher = pattern.matcher(results);
+					if(matcher.find()) { //found a new Lux Value
+						String newValue = matcher.group(0);
+						updateListeners(Double.parseDouble(newValue));
+					} else {
+						LOG.warn("No match found in the SPARQL Query! Updating 0 (zero).");
+						updateListeners(0);
+					}
+				} else 
+					LOG.warn("Received more than just one value on the SPARQL Query!");
+			} catch (Exception e) {
+				LOG.error(e);
+			}
+			try {
+				Thread.sleep(1000);
+			} catch (InterruptedException e) {
+				LOG.error(e);
+			}
+		}
+	}
+	
+	/**
+	 * Update all the Listeners that a new value is there.
+	 * @param newValue
+	 */
+	private void updateListeners(double newValue) {
+		for(SparqlListener listener : listeners) {
+			listener.updateSparqlListener(newValue);
+		}
+	}
+	
+	/**
+	 * Register a sparql Listeners with the Interface.
+	 * @param listener a {@link SparqlListener}
+	 */
+	public void registerSparqlListener(SparqlListener listener) {
+		listeners.add(listener);
+	}
+
+	@Override
+	public String getQuery() {
+		return this.sparql;
+	}
+	
+	@Override 
+	public String getRegex() {
+		return regex;
+	}
+
+	@Override
+	public void updateSPARQLValue(String newValue) {
+		try {
+			updateListeners(Double.parseDouble(newValue));
+		} catch (NumberFormatException e) {
+			LOG.error("Can not parse sparql response: "+ newValue, e);
+		}
+	}
+}
